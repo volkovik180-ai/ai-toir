@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Поиск схожих дефектов</title>
+<style>
+  :root {
+    --bg: #1e1e1e;
+    --panel: #2a2a2a;
+    --border: #3a3a3a;
+    --text: #e0e0e0;
+    --muted: #888;
+    --accent: #4a9eff;
+    --ok: #4ade80;
+    --err: #ff7373;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { margin: 0 0 16px; font-size: 20px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  // Стиль select, чтобы не отличался от input
+  select {
+    width: 100%;
+    background: #1a1a1a;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 14px;
+  }
+  textarea, input[type="number"] {
+    width: 100%;
+    background: #1a1a1a;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 14px;
+  }
+  // Стиль select, чтобы не отличался от input
+  select {
+    width: 100%;
+    max-width: 100%;
+    background: #1a1a1a;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  textarea { min-height: 80px; resize: vertical; }
+  .row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .row > div { flex: 1 1 180px; min-width: 0; }
+  .row > div.small { flex: 0 1 200px; min-width: 0; }
+  .row > div.tight { flex: 0 0 auto; }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: 0;
+    border-radius: 4px;
+    padding: 9px 18px;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button.secondary { background: #555; }
+  button:disabled { background: #555; cursor: default; opacity: 0.6; }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+  .status {
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--muted);
+    white-space: pre-wrap;
+  }
+  .status.error { color: var(--err); }
+  .status.ok { color: var(--ok); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th { color: var(--muted); font-weight: 600; background: #252525; position: sticky; top: 0; }
+  tr:hover td { background: #2f2f2f; }
+  .score {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .empty { color: var(--muted); padding: 20px; text-align: center; }
+  .progress {
+    height: 4px;
+    background: #1a1a1a;
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 8px;
+  }
+  .progress > div {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.2s;
+  }
+  .table-wrap { max-height: 70vh; overflow: auto; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .pill { background:#1a1a1a; border:1px solid var(--border); border-radius:12px; padding:2px 8px; font-size:12px; color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>Поиск схожих дефектов (косинусное сходство эмбеддингов)</h1>
+
+  <div class="panel">
+    <div class="row">
+      <div>
+        <label for="query">Описание дефекта</label>
+        <textarea id="query" placeholder="Например: течь сальникового уплотнения насоса"></textarea>
+      </div>
+    </div>
+    <div class="row" style="margin-top: 12px; align-items: flex-start;">
+      <div class="small">
+        <label for="plantFilter">АЭС</label>
+        <select id="plantFilter"><option value="__ALL__">Все</option></select>
+      </div>
+      <div class="small">
+        <label for="equipmentFilter">Оборудование</label>
+        <select id="equipmentFilter"><option value="__ALL__">Все</option></select>
+      </div>
+      <div class="small">
+        <label for="threshold">Чувствительность (порог, 0–1)</label>
+        <input type="number" id="threshold" value="0.7" min="0" max="1" step="0.05">
+      </div>
+      <div class="small">
+        <label for="topk">Максимум результатов</label>
+        <input type="number" id="topk" value="20" min="1" max="500" step="1">
+      </div>
+      <div class="tight" style="padding-top: 22px;">
+        <button id="findBtn">Найти</button>
+      </div>
+    </div>
+    <div class="status" id="status">Готов к работе.</div>
+    <div class="progress" id="progress" style="display:none;"><div></div></div>
+    <div class="toolbar" style="margin-top: 10px;">
+      <span class="pill" id="cachePill">кэш: неизвестно</span>
+      <span class="pill" id="srcPill">источник: —</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:90px;">Сходство</th>
+            <th>Описание дефекта</th>
+            <th style="width:120px;">АЭС</th>
+            <th style="width:200px;">Оборудование</th>
+            <th style="width:170px;">Дата</th>
+          </tr>
+        </thead>
+        <tbody id="results"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script type="module">
+  // Эмбеддинги считаются на сервере (serve.py) — POST /embed
+  // Кэш дефектов берётся готовым из defects_cache.json (build_cache.py)
+  const MODEL_ID   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
+  const CACHE_URL  = "defects_cache.json";
+  const CSV_URL    = "Описания_дефектов.csv";
+  const DB_NAME    = "defects_cache_db";
+  const DB_STORE   = "items";
+  const ITEM_KEY   = "defects_items";
+
+  const $ = (id) => document.getElementById(id);
+  const status      = $("status");
+  const progress    = $("progress");
+  const progressBar = progress.querySelector("div");
+  const findBtn     = $("findBtn");
+  const resultsBody = $("results");
+  const cachePill   = $("cachePill");
+  const srcPill     = $("srcPill");
+  const plantFilter     = $("plantFilter");
+  const equipmentFilter = $("equipmentFilter");
+
+  let cacheData = null;
+  let extractor = null;
+
+  function setStatus(text, kind = "") {
+    status.textContent = text;
+    status.className = "status" + (kind ? " " + kind : "");
+  }
+  function setProgress(p) {
+    if (p == null) { progress.style.display = "none"; return; }
+    progress.style.display = "block";
+    progressBar.style.width = Math.round(p * 100) + "%";
+  }
+  function escapeHtml(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+  function renderResults(items) {
+    if (items.length === 0) {
+      resultsBody.innerHTML = '<tr><td colspan="5" class="empty">Ничего не найдено — попробуйте снизить порог чувствительности.</td></tr>';
+      return;
+    }
+    const rows = items.map((r) => `
+      <tr>
+        <td class="score">${r.score.toFixed(3)}</td>
+        <td>${escapeHtml(r.description)}</td>
+        <td>${escapeHtml(r.plant)}</td>
+        <td>${escapeHtml(r.equipment)}</td>
+        <td>${escapeHtml(r.date)}</td>
+      </tr>
+    `);
+    resultsBody.innerHTML = rows.join("");
+  }
+
+  function cosine(a, b) {
+    let s = 0;
+    for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+    return s;
+  }
+
+  // ----- JSON-кэш с сервера (план A) -----
+  async function loadServerCache() {
+    setStatus("Загружаю defects_cache.json...");
+    const r = await fetch(CACHE_URL, { cache: "no-store" });
+    if (!r.ok) throw new Error("defects_cache.json не найден (HTTP " + r.status + ")");
+    const data = await r.json();
+    if (!Array.isArray(data) || !data.length) throw new Error("defects_cache.json пустой");
+    if (!data[0].embedding || !data[0].embedding.length) throw new Error("В кэше нет эмбеддингов");
+    return data;
+  }  // ----- CSV (план B) + построение в браузере -----
+  async function fetchCsvText(url) {
+    const buf = await (await fetch(url)).arrayBuffer();
+    try { return new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+    catch {
+      try { return new TextDecoder("windows-1251").decode(buf); }
+      catch { return new TextDecoder("utf-8").decode(buf); }
+    }
+  }
+  function parseCsv(text, delim = ";") {
+    const rows = []; let row = [], field = "", inQ = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQ) {
+        if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+        else field += c;
+      } else {
+        if (c === '"') inQ = true;
+        else if (c === delim) { row.push(field); field = ""; }
+        else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+        else if (c === "\r") { /* skip */ }
+        else field += c;
+      }
+    }
+    if (field.length || row.length) { row.push(field); rows.push(row); }
+    if (!rows.length) return [];
+    const header = rows[0].map((h) => h.trim());
+    return rows.slice(1).filter((r) => r.length && r.some((c) => c && c.trim()))
+      .map((r) => Object.fromEntries(header.map((h, i) => [h, (r[i] ?? "").trim()])));
+  }
+  function normalize(s) {
+    return (s ?? "").toString().replace(/\s+/g, " ").replace(/ /g, " ").trim();
+  }
+
+  // ----- IndexedDB -----
+  function openDb() {
+    return new Promise((res, rej) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains(DB_STORE)) req.result.createObjectStore(DB_STORE); };
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    });
+  }
+  async function dbGet(key) {
+    const db = await openDb();
+    return new Promise((res, rej) => {
+      const r = db.transaction(DB_STORE, "readonly").objectStore(DB_STORE).get(key);
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+  }
+  async function dbPut(key, val) {
+    const db = await openDb();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(DB_STORE, "readwrite");
+      tx.objectStore(DB_STORE).put(val, key);
+      tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
+    });
+  }
+
+  // ----- Model (server-side) -----
+  async function embedOne(text) {
+    const r = await fetch("/embed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { const j = await r.json(); if (j.error) msg = j.error; } catch {}
+      throw new Error(msg);
+    }
+    const j = await r.json();
+    return j.embedding;
+  }
+
+  // ----- Заполнение select-ов фильтров из кэша -----
+  // Обрезаем длинные значения для отображения, чтобы native <select>
+  // не «вылезал» за границы колонки. Полное значение остаётся в option.value
+  // и в title (всплывающая подсказка).
+  const TRUNCATE_AT = 16;
+  const ELLIPSIS = "…";
+  function truncate(s, n = TRUNCATE_AT) {
+    if (!s) return s;
+    return s.length > n ? s.slice(0, n - 1) + ELLIPSIS : s;
+  }
+  function fillFilterOptions(sel, values) {
+    // Сортируем, пустые значения — отдельной группой "—"
+    const empty = values.filter((v) => !v);
+    const real  = values.filter((v) =>  v).sort((a, b) => a.localeCompare(b, "ru"));
+    // Сохраняем текущее выбранное значение
+    const prev = sel.value || "__ALL__";
+    sel.innerHTML = "";
+    const optAll = document.createElement("option");
+    optAll.value = "__ALL__";
+    optAll.textContent = `Все (${values.length})`;
+    optAll.title = `Все (${values.length})`;
+    sel.appendChild(optAll);
+    for (const v of real) {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = truncate(v);
+      o.title = v; // полное значение во всплывающей подсказке
+      sel.appendChild(o);
+    }
+    if (empty.length) {
+      const sep = document.createElement("option");
+      sep.disabled = true;
+      sep.textContent = "— без значения —";
+      sep.title = "— без значения —";
+      sel.appendChild(sep);
+      const o = document.createElement("option");
+      o.value = "__EMPTY__";
+      o.textContent = `(пусто) — ${empty.length}`;
+      o.title = `(пусто) — ${empty.length}`;
+      sel.appendChild(o);
+    }
+    // Восстановим выбор, если значение всё ещё присутствует
+    const exists = Array.from(sel.options).some((o) => o.value === prev);
+    sel.value = exists ? prev : "__ALL__";
+  }
+
+  function populateFilters(data) {
+    const plants = new Set();
+    const equips = new Set();
+    for (const r of data) {
+      plants.add((r.plant || "").trim());
+      equips.add((r.equipment || "").trim());
+    }
+    fillFilterOptions(plantFilter,     [...plants]);
+    fillFilterOptions(equipmentFilter, [...equips]);
+  }
+
+  // Проверяет, совпадает ли значение фильтра с plant/equipment в записи
+  // (с учётом "__ALL__" / "__EMPTY__"). Используется для зависимой фильтрации.
+  function matchesFilter(fieldValue, selValue) {
+    const v = (fieldValue || "").trim();
+    if (selValue === "__ALL__")   return true;
+    if (selValue === "__EMPTY__") return !v;
+    return v === selValue;
+  }
+
+  // Перестраивает опции фильтров по результатам поиска (scored),
+  // учитывая перекрёстное влияние: опции АЭС зависят от Оборудования и наоборот.
+  // Возвращает { plantReset, equipReset } — были ли фильтры сброшены на "__ALL__".
+  function updateFiltersFromResults(scored) {
+    const curPlant = plantFilter.value;
+    const curEquip = equipmentFilter.value;
+
+    // Уникальные АЭС среди записей, прошедших фильтр по Оборудованию
+    const plants = new Set();
+    for (const r of scored) {
+      if (matchesFilter(r.equipment, curEquip)) {
+        plants.add((r.plant || "").trim());
+      }
+    }
+    // Уникальное Оборудование среди записей, прошедших фильтр по АЭС
+    const equips = new Set();
+    for (const r of scored) {
+      if (matchesFilter(r.plant, curPlant)) {
+        equips.add((r.equipment || "").trim());
+      }
+    }
+
+    // fillFilterOptions сам восстановит выбор, если значение всё ещё в списке.
+    // Если нет — он сбросит на "__ALL__". Поймаем это сравнением.
+    const beforePlant = plantFilter.value;
+    const beforeEquip = equipmentFilter.value;
+    fillFilterOptions(plantFilter,     [...plants]);
+    fillFilterOptions(equipmentFilter, [...equips]);
+    const plantReset = plantFilter.value !== beforePlant;
+    const equipReset = equipmentFilter.value !== beforeEquip;
+    return { plantReset, equipReset };
+  }
+
+  // ----- Cache load -----
+  async function buildInBrowser() {
+    // Режим построения в браузере отключён — кэш собирается Python-скриптом build_cache.py
+    throw new Error("Построение кэша в браузере отключено. Запустите build_cache.py.");
+  }
+
+  async function loadCache() {
+    cachePill.textContent = "кэш: инициализация...";
+    // План A: готовый JSON от build_cache.py
+    try {
+      cacheData = await loadServerCache();
+      srcPill.textContent = "источник: defects_cache.json (Python)";
+      cachePill.textContent = "кэш: " + cacheData.length + " зап.";
+      populateFilters(cacheData);
+      return;
+    } catch (e) {
+      setStatus("JSON-кэш не найден (" + e.message + "). Пробую построить в браузере...");
+    }
+    // План B: пробуем кэш в IndexedDB
+    try {
+      const cached = await dbGet(ITEM_KEY);
+      if (Array.isArray(cached) && cached.length) {
+        cacheData = cached;
+        srcPill.textContent = "источник: IndexedDB";
+        cachePill.textContent = "кэш: " + cached.length + " зап.";
+        populateFilters(cacheData);
+        return;
+      }
+    } catch {}
+    // План C: строим в браузере из CSV
+    await buildInBrowser();
+    srcPill.textContent = "источник: построено в браузере из CSV";
+  }
+
+  async function find() {
+    const query = $("query").value.trim();
+    const threshold = Math.max(0, Math.min(1, parseFloat($("threshold").value) || 0));
+    const topK = Math.max(1, parseInt($("topk").value, 10) || 20);
+    let plantSel = plantFilter.value;
+    let equipSel = equipmentFilter.value;
+    if (!query) { setStatus("Введите описание дефекта.", "error"); return; }
+    if (!cacheData) { setStatus("Кэш не загружен. Подождите или обновите страницу.", "error"); return; }
+    findBtn.disabled = true;
+    try {
+      setStatus("Считаю эмбеддинг запроса...");
+      const qVec = await embedOne(query);
+      setStatus("Ищу похожие дефекты...");
+      const t0 = performance.now();
+      const scored = [];
+      for (let i = 0; i < cacheData.length; i++) {
+        const r = cacheData[i];
+        // Фильтр по АЭС
+        if (plantSel !== "__ALL__") {
+          const p = (r.plant || "").trim();
+          if (plantSel === "__EMPTY__") { if (p) continue; }
+          else if (p !== plantSel) continue;
+        }
+        // Фильтр по Оборудованию
+        if (equipSel !== "__ALL__") {
+          const e = (r.equipment || "").trim();
+          if (equipSel === "__EMPTY__") { if (e) continue; }
+          else if (e !== equipSel) continue;
+        }
+        const s = cosine(qVec, r.embedding);
+        if (s >= threshold) scored.push({ ...r, score: s });
+      }
+      scored.sort((a, b) => b.score - a.score);
+
+      // Перестроить опции фильтров по результатам поиска (зависимая фильтрация).
+      // Если выбранное значение пропало — fillFilterOptions сбросит на "__ALL__",
+      // и мы перезапустим поиск, чтобы не показывать пустую таблицу.
+      const { plantReset, equipReset } = updateFiltersFromResults(scored);
+      if (plantReset || equipReset) {
+        return find();
+      }
+
+      const top = scored.slice(0, topK);
+      const dt = (performance.now() - t0).toFixed(0);
+      renderResults(top);
+      const filtDesc = [];
+      if (plantSel !== "__ALL__") filtDesc.push("АЭС=" + (plantSel === "__EMPTY__" ? "∅" : plantSel));
+      if (equipSel !== "__ALL__") filtDesc.push("оборудование=" + (equipSel === "__EMPTY__" ? "∅" : equipSel));
+      const filtStr = filtDesc.length ? `, фильтры: ${filtDesc.join(", ")}` : "";
+      setStatus(`Найдено совпадений: ${scored.length}. Показано топ-${top.length} (порог ${threshold}, поиск ${dt} мс${filtStr}).`, "ok");
+    } catch (e) {
+      console.error(e);
+      setStatus("Ошибка: " + e.message, "error");
+    } finally {
+      findBtn.disabled = false;
+    }
+  }
+
+  findBtn.addEventListener("click", find);
+
+  (async () => {
+    try {
+      await loadCache();
+      setStatus(`Готово. ${cacheData.length} дефектов в кэше. Введите описание и нажмите «Найти».`, "ok");
+    } catch (e) {
+      console.error(e);
+      setStatus("Ошибка инициализации: " + e.message, "error");
+    }
+  })();
+  </script>
+</body>
+</html>
