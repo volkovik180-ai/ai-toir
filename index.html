@@ -193,12 +193,19 @@
   <script type="module">
   // Эмбеддинги считаются на сервере (serve.py) — POST /embed
   // Кэш дефектов берётся готовым из defects_cache.json (build_cache.py)
-  const MODEL_ID   = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2";
+  // Дефолты UI (порог, topk, truncate) приходят с сервера GET /config.
   const CACHE_URL  = "defects_cache.json";
   const CSV_URL    = "Описания_дефектов.csv";
   const DB_NAME    = "defects_cache_db";
   const DB_STORE   = "items";
   const ITEM_KEY   = "defects_items";
+
+  // Локальные fallback-дефолты на случай, если /config недоступен
+  // (например, открыли index.html через python -m http.server без serve.py).
+  const APP_CONFIG = {
+    ui:    { default_threshold: 0.7, default_topk: 20, truncate_at: 16 },
+    model: { name: "" },
+  };
 
   const $ = (id) => document.getElementById(id);
   const status      = $("status");
@@ -341,7 +348,8 @@
   // Обрезаем длинные значения для отображения, чтобы native <select>
   // не «вылезал» за границы колонки. Полное значение остаётся в option.value
   // и в title (всплывающая подсказка).
-  const TRUNCATE_AT = 16;
+  // Лимит берётся из APP_CONFIG.ui.truncate_at (приходит с сервера /config).
+  let TRUNCATE_AT = APP_CONFIG.ui.truncate_at;
   const ELLIPSIS = "…";
   function truncate(s, n = TRUNCATE_AT) {
     if (!s) return s;
@@ -530,8 +538,26 @@
 
   findBtn.addEventListener("click", find);
 
+  // Получить дефолты UI с сервера (best-effort: если не получилось — остаются fallback)
+  async function applyServerConfig() {
+    try {
+      const r = await fetch("/config", { cache: "no-store" });
+      if (!r.ok) return;
+      const c = await r.json();
+      if (c.ui)    Object.assign(APP_CONFIG.ui, c.ui);
+      if (c.model) Object.assign(APP_CONFIG.model, c.model);
+    } catch (e) {
+      console.warn("Не удалось загрузить /config, используются локальные дефолты:", e);
+    }
+    // Применяем дефолты к inputs
+    $("threshold").value = APP_CONFIG.ui.default_threshold;
+    $("topk").value      = APP_CONFIG.ui.default_topk;
+    TRUNCATE_AT          = APP_CONFIG.ui.truncate_at;
+  }
+
   (async () => {
     try {
+      await applyServerConfig();
       await loadCache();
       setStatus(`Готово. ${cacheData.length} дефектов в кэше. Введите описание и нажмите «Найти».`, "ok");
     } catch (e) {

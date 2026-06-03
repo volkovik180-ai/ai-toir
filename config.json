@@ -1,0 +1,18 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8000
+  },
+  "model": {
+    "name": "BAAI/bge-m3",
+    "query_instruction": "",
+    "use_fp16": false,
+    "max_length": 512,
+    "batch_size": 1
+  },
+  "ui": {
+    "default_threshold": 0.7,
+    "default_topk": 20,
+    "truncate_at": 16
+  }
+}

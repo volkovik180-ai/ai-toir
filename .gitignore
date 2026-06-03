@@ -26,3 +26,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code statusline (не наш конфиг)
+settings.json
