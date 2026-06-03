@@ -1,26 +1,35 @@
 """
-Включение/выключение LAN-доступа к ai-toir (порт 8000).
-Управляет правилом Windows Firewall "ai-toir serve.py".
+Управление ai-toir: firewall-правило + процесс serve.py.
 
-Использование:
-    python toggle_lan.py on       # открыть порт 8000 для LAN
-    python toggle_lan.py off      # закрыть
-    python toggle_lan.py status   # показать текущее состояние
-    python toggle_lan.py         # toggle (вкл<->выкл)
+Подкоманды:
+  on / off / toggle         — открыть/закрыть порт 8000 (Firewall, требует админа)
+  status                    — общее состояние: firewall + serve.py
+  serve-on                  — запустить serve.py в фоне
+  serve-off                 — остановить serve.py (по PID в serve.pid)
+  serve-status              — запущен ли serve.py
+  restart                   — kill+start serve.py (без перезапуска firewall)
 
-Если запущен не от администратора — автоматически перезапускает себя
-с UAC-подтверждением (нужно лишь нажать "Да" в окне UAC).
+Все команды, требующие записи (изменение правила, kill процесса) — автоUAC.
 
-При первом запуске создаёт правило автоматически.
+serve.py пишет PID в serve.pid при старте (мы сохраняем) и удаляет при штатной
+остановке. На Windows PID процесса python (а не ScriptBlock) берём из
+Get-CimInstance Win32_Process по ParentProcessId или по командной строке.
 """
 from __future__ import annotations
 
 import ctypes
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 RULE_NAME = "ai-toir serve.py"
 PORT = 8000
+BASE = Path(__file__).parent
+SERVE_PID_FILE = BASE / "serve.pid"
+SERVE_LOG = BASE / "serve.log"
+SERVE_ERR = BASE / "serve.err"
+SERVE_CMD = "serve.py"
 
 
 def is_admin() -> bool:
@@ -31,7 +40,7 @@ def is_admin() -> bool:
 
 
 def relaunch_as_admin() -> int:
-    """Перезапускает себя с UAC и возвращает код возврата дочернего процесса."""
+    """Перезапускает себя с UAC и выходит (вывод ребёнка мы не видим)."""
     params = " ".join(f'"{a}"' for a in sys.argv)
     rc = ctypes.windll.shell32.ShellExecuteW(
         None, "runas", sys.executable, params, None, 0
@@ -39,8 +48,6 @@ def relaunch_as_admin() -> int:
     if rc <= 32:
         print("Не удалось получить права администратора (UAC отклонён?).", file=sys.stderr)
         return 1
-    # После запуска дочернего процесса в новом окне мы не видим его вывод;
-    # предполагаем успех, если ShellExecuteW вернул > 32.
     return 0
 
 
@@ -49,6 +56,8 @@ def run(cmd: list[str]) -> tuple[int, str, str]:
     return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 
+# ---------- Firewall ----------
+
 def ensure_rule() -> None:
     rc, out, _ = run([
         "powershell", "-NoProfile", "-Command",
@@ -56,7 +65,6 @@ def ensure_rule() -> None:
     ])
     if rc == 0 and out.strip().lower() == "true":
         return
-    # Создаём (вызывающий код уже проверил, что мы под админом)
     print(f"Создаю правило '{RULE_NAME}' для порта {PORT}...")
     rc, out, err = run([
         "powershell", "-NoProfile", "-Command",
@@ -69,29 +77,17 @@ def ensure_rule() -> None:
     print("  создано.")
 
 
-def get_status() -> str:
+def get_fw_status() -> str:
     rc, out, _ = run([
         "powershell", "-NoProfile", "-Command",
         f"(Get-NetFirewallRule -DisplayName '{RULE_NAME}' -ErrorAction SilentlyContinue).Enabled"
     ])
     if rc != 0 or not out.strip():
         return "?"
-    if "True" in out:
-        return "on"
-    if "False" in out:
-        return "off"
-    return "?"
+    return "on" if "True" in out else "off" if "False" in out else "?"
 
 
-def is_serve_running() -> bool:
-    rc, out, _ = run([
-        "powershell", "-NoProfile", "-Command",
-        f"(Get-NetTCPConnection -LocalPort {PORT} -State Listen -ErrorAction SilentlyContinue) -ne $null"
-    ])
-    return rc == 0 and out.strip().lower() == "true"
-
-
-def set_enabled(enabled: bool) -> None:
+def set_fw_enabled(enabled: bool) -> None:
     val = "True" if enabled else "False"
     rc, out, err = run([
         "powershell", "-NoProfile", "-Command",
@@ -102,28 +98,133 @@ def set_enabled(enabled: bool) -> None:
         sys.exit(1)
 
 
+# ---------- serve.py ----------
+
+def is_serve_listening() -> bool:
+    rc, out, _ = run([
+        "powershell", "-NoProfile", "-Command",
+        f"(Get-NetTCPConnection -LocalPort {PORT} -State Listen -ErrorAction SilentlyContinue) -ne $null"
+    ])
+    return rc == 0 and out.strip().lower() == "true"
+
+
+def find_serve_pids() -> list[int]:
+    """Возвращает PID'ы python-процессов, у которых в командной строке есть serve.py.
+
+    Используем WMI — он показывает полную CommandLine (в т.ч. аргументы скрипта),
+    в отличие от Get-Process, который их не отдаёт.
+    Имя процесса — python.exe или python3.13.exe (WindowsApps alias).
+    """
+    rc, out, _ = run([
+        "powershell", "-NoProfile", "-Command",
+        f"Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='python3.13.exe'\" | "
+        f"Where-Object {{ $_.CommandLine -and $_.CommandLine -like '*{SERVE_CMD}*' }} | "
+        f"Select-Object -ExpandProperty ProcessId"
+    ])
+    pids: list[int] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+
+def start_serve() -> None:
+    if is_serve_listening() or find_serve_pids():
+        print("serve.py уже запущен — ничего не делаю.")
+        return
+    print("Запускаю serve.py в фоне...")
+    # PYTHONIOENCODING=utf-8 — иначе cp1251 в stderr на Windows
+    # -RedirectStandardOutput/Error — логи
+    ps = (
+        f"$env:PYTHONIOENCODING='utf-8'; "
+        f"$p = Start-Process python -ArgumentList '{SERVE_CMD}' "
+        f"-RedirectStandardOutput '{SERVE_LOG}' -RedirectStandardError '{SERVE_ERR}' "
+        f"-WindowStyle Hidden -PassThru; "
+        f"$p.Id | Out-File -Encoding utf8 '{SERVE_PID_FILE}'"
+    )
+    rc, out, err = run(["powershell", "-NoProfile", "-Command", ps])
+    if rc != 0:
+        print(f"ОШИБКА запуска: {err or out}", file=sys.stderr)
+        sys.exit(1)
+    print(f"  запущен, PID в {SERVE_PID_FILE.name}.")
+
+
+def stop_serve() -> None:
+    pids = find_serve_pids()
+    if not pids:
+        print("serve.py не запущен.")
+        if SERVE_PID_FILE.exists():
+            try: SERVE_PID_FILE.unlink()
+            except OSError: pass
+        return
+    print(f"Останавливаю serve.py (PID: {', '.join(map(str, pids))})...")
+    rc, out, err = run([
+        "powershell", "-NoProfile", "-Command",
+        f"Stop-Process -Id {','.join(map(str, pids))} -Force -ErrorAction SilentlyContinue"
+    ])
+    if rc != 0:
+        print(f"ОШИБКА: {err or out}", file=sys.stderr)
+        sys.exit(1)
+    if SERVE_PID_FILE.exists():
+        try: SERVE_PID_FILE.unlink()
+        except OSError: pass
+    print("  остановлен.")
+
+
+def serve_status() -> str:
+    pids = find_serve_pids()
+    if pids:
+        return f"работает (PID {', '.join(map(str, pids))})"
+    return "не работает"
+
+
+# ---------- main ----------
+
 def main() -> int:
-    # Команды, требующие записи (создание/изменение правила), требуют админа.
     args = sys.argv[1:]
-    cmd = args[0].lower() if args else "toggle"
-    needs_admin = cmd in ("on", "off", "toggle")
+    cmd = args[0].lower() if args else "status"
+
+    fw_cmds = {"on", "off", "toggle"}
+    serve_cmds = {"serve-on", "serve-off", "restart"}
+    needs_admin = cmd in fw_cmds or cmd in serve_cmds
 
     if needs_admin and not is_admin():
         print("Запрашиваю права администратора (UAC)...")
         return relaunch_as_admin()
 
-    if cmd == "status":
-        ensure_rule()
-        s = get_status()
-        print(f"Firewall: {s}   serve.py: {'работает' if is_serve_running() else 'НЕ работает'}")
+    # ----- read-only serve status (no admin) -----
+    if cmd == "serve-status":
+        print(f"serve.py: {serve_status()}")
         return 0
 
-    if cmd not in ("on", "off", "toggle"):
+    # ----- status (no admin) -----
+    if cmd == "status":
+        ensure_rule()
+        fw = get_fw_status()
+        sv = serve_status()
+        print(f"Firewall: {fw}   serve.py: {sv}")
+        return 0
+
+    # ----- serve.py (admin) -----
+    if cmd in serve_cmds:
+        if cmd == "serve-on":
+            start_serve()
+        elif cmd == "serve-off":
+            stop_serve()
+        elif cmd == "restart":
+            stop_serve()
+            start_serve()
+        print(f"  итого: serve.py — {serve_status()}")
+        return 0
+
+    # ----- firewall (admin) -----
+    if cmd not in fw_cmds:
         print(__doc__)
         return 1
 
     ensure_rule()
-    current = get_status()
+    current = get_fw_status()
     if cmd == "on":
         target = True
     elif cmd == "off":
@@ -132,12 +233,12 @@ def main() -> int:
         target = current != "on"
 
     if (current == "on") == target:
-        print(f"Уже {'включён' if target else 'выключен'} — ничего не делаю.")
+        print(f"Firewall уже {'включён' if target else 'выключен'} — ничего не делаю.")
         return 0
 
-    set_enabled(target)
+    set_fw_enabled(target)
     new = "включён" if target else "выключен"
-    print(f"Порт {PORT}: {new}.   serve.py: {'работает' if is_serve_running() else 'НЕ работает'}.")
+    print(f"Firewall: {new}.   serve.py: {serve_status()}.")
     return 0
 
 
